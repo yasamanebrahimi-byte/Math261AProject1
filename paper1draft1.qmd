@@ -238,7 +238,7 @@ The test used a significance level of $\alpha=0.05$. I also calculated a 95% con
 
 The regression assumptions were also checked before interpreting the results. Since the predictor only has two groups, the linearity assumption is less of a concern than it would be with a continuous predictor. However, the groups do not have exactly the same variation in MHI, and the residuals are somewhat right-skewed. Independence may also not be perfect because nearby water systems can have similar economic and geographic conditions. In addition, some community systems have missing MHI values, which may affect how representative the final sample is.
 
-No model selection was needed because the analysis only uses one explanatory variable based directly on the research question. I checked the model using residual plots and a sensitivity analysis that removed MHI values recorded at the ACS boundaries of \$2,500 and \$250,000. All data cleaning, analysis, and figures were completed in R using the `tidyverse`, `ggpubr`, and `gridExtra` packages.
+No model selection was needed because the analysis only uses one explanatory variable based directly on the research question. I checked the model using residual plots and a sensitivity analysis that removed MHI values recorded at the ACS boundaries of \$2,500 and \$250,000. All data cleaning, analysis, and figures were completed in R (R Core Team, 2026) using the `tidyverse`, `ggpubr`, and `gridExtra` packages.
 
 # Results {#sec-results}
 
