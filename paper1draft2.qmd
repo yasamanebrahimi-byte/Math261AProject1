@@ -1,16 +1,23 @@
 ---
 title: "Median Household Income and Primary Drinking Water Violations in California"
-subtitle: "A simple linear regression analysis of 2026 SAFER data"
 author: "Yasaman Ebrahimi"
 date: today
 date-format: long
 
-abstract: "This paper examines whether service-area median household income (MHI) differs between California community water systems with and without a current primary maximum contaminant level (MCL) violation. Using the September 22, 2026 SAFER public dataset, I fit a simple linear regression with MHI as the response and violation status as a binary predictor. Among 2,156 systems with usable MHI data, systems with a primary MCL violation had an estimated mean MHI about 25,456 dollars lower than systems without one (95% CI: 16,209 to 34,704 dollars lower; p < 0.001). The results show a clear association, although the analysis is observational and violation status explains only a small portion of the overall variation in MHI."
+abstract: "This paper examines whether service-area median household income (MHI) differs between California community water systems with and without a current primary maximum contaminant level (MCL) violation. I fit a simple linear regression with MHI as the response and violation status as a binary predictor using the SAFER public dataset from September 22, 2026. Among 2,156 systems with usable MHI data, systems with a primary MCL violation had an estimated mean MHI about 25,456 dollars lower than systems without one (95% CI: 16,209 to 34,704 dollars lower; p < 0.001). The results show a clear association, although the analysis is observational and violation status explains only a small portion of the overall variation in MHI."
 
 format:
   pdf:
     keep-tex: false
     documentclass: article
+    indent: true
+    include-in-header:
+      - text: |
+          \usepackage{indentfirst}
+          \usepackage{ragged2e}
+          \setlength{\parindent}{1.5em}
+          \setlength{\RaggedRightParindent}{1.5em} % Sets indentation for ragged-right text
+          \RaggedRight
 
 number-sections: true
 
@@ -25,6 +32,7 @@ execute:
 
 library(tidyverse)
 library(ggpubr)
+library(sandwich)
 
 options(scipen = 999)
 theme_set(theme_pubr())
@@ -75,20 +83,38 @@ analysis <- community |>
   mutate(mhi_10k = mhi / 10000)
 
 n_community <- nrow(community)
-n_mhi_missing <- sum(is.na(community$mhi))
 n_analysis <- nrow(analysis)
 n_no <- sum(analysis$mcl_violation == 0)
 n_yes <- sum(analysis$mcl_violation == 1)
 
-missing_no <- community |>
-  filter(PRIMARY_MCL_VIOLATION == "NO") |>
-  summarize(rate = mean(is.na(mhi))) |>
-  pull(rate)
+missing_summary <- bind_rows(
+  community |>
+    summarize(
+      group = "Overall",
+      n_total = n(),
+      n_missing = sum(is.na(mhi))
+    ),
+  community |>
+    filter(PRIMARY_MCL_VIOLATION == "YES") |>
+    summarize(
+      group = "Violation",
+      n_total = n(),
+      n_missing = sum(is.na(mhi))
+    ),
+  community |>
+    filter(PRIMARY_MCL_VIOLATION == "NO") |>
+    summarize(
+      group = "No violation",
+      n_total = n(),
+      n_missing = sum(is.na(mhi))
+    )
+) |>
+  mutate(percent_missing = n_missing / n_total)
 
-missing_yes <- community |>
-  filter(PRIMARY_MCL_VIOLATION == "YES") |>
-  summarize(rate = mean(is.na(mhi))) |>
-  pull(rate)
+n_mhi_missing <- missing_summary$n_missing[missing_summary$group == "Overall"]
+missing_overall <- missing_summary$percent_missing[missing_summary$group == "Overall"]
+missing_yes <- missing_summary$percent_missing[missing_summary$group == "Violation"]
+missing_no <- missing_summary$percent_missing[missing_summary$group == "No violation"]
 
 n_low_endpoint <- sum(analysis$mhi == 2500)
 n_high_endpoint <- sum(analysis$mhi == 250000)
@@ -120,6 +146,17 @@ t_b1 <- model_sum$coefficients[2, 3]
 p_b1 <- model_sum$coefficients[2, 4]
 r2 <- model_sum$r.squared
 
+robust_vcov <- sandwich::vcovHC(model, type = "HC3")
+robust_se <- sqrt(diag(robust_vcov))
+ols_se_b1 <- model_sum$coefficients[2, 2]
+robust_se_b1 <- robust_se[2]
+robust_t_b1 <- b1 / robust_se_b1
+robust_p_b1 <- 2 * pt(
+  abs(robust_t_b1),
+  df = df.residual(model),
+  lower.tail = FALSE
+)
+
 ci_b1_low <- model_ci[2, 1]
 ci_b1_high <- model_ci[2, 2]
 
@@ -145,19 +182,21 @@ model_diagnostics <- analysis |>
   )
 ```
 
+**Project repository:** [github.com/yasamanebrahimi-byte/Math261AProject1](https://github.com/yasamanebrahimi-byte/Math261AProject1)
+
 # Introduction
 
 California public drinking water systems serve communities with different socioeconomic conditions and different levels of water-quality compliance. A maximum contaminant level (MCL) is a regulatory limit on how much of a contaminant can be present in drinking water. Under California's Failing Water System criteria, a primary MCL violation with an open enforcement action is one condition that can place a system on the Failing list (California State Water Resources Control Board, 2024). Since primary MCLs are health-based standards, it is important to understand whether these violations are more common in communities with different income levels.
 
 Previous research has found relationships between drinking water compliance and socioeconomic conditions. Allaire, Wu, and Lall (2018) found that health-based violations were associated with several community and system characteristics nationally. In California's San Joaquin Valley, Balazs et al. (2012) found that arsenic violations were more common among systems serving disadvantaged populations. The State Water Board's 2026 Needs Assessment similarly reported that Failing and At-Risk systems are more likely to serve disadvantaged communities (California State Water Resources Control Board, 2026a).
 
-This paper asks: **How does service-area median household income differ between California community water systems with and without a current primary MCL violation?** I use simple linear regression with MHI as the response and violation status as a binary predictor. The results show that systems with a primary MCL violation serve areas with substantially lower estimated MHI on average, although violation status explains only a small portion of the total variation in MHI.
+This paper asks: **How does service-area median household income differ between California community water systems with and without a current primary MCL violation?** I use simple linear regression with MHI as the response and violation status as a binary predictor. The analysis indicates that systems with a primary MCL violation serve areas with substantially lower estimated MHI on average, although violation status explains only a small portion of the total variation in MHI.
 
 # Data {#sec-data}
 
 The data came from the California State Water Resources Control Board's **Drinking Water - SAFER Dashboard Failing and At-Risk Drinking Water Systems** dataset (California State Water Resources Control Board, 2026b). The file contains 3,190 water systems and 140 variables. For this analysis, I only used community water systems because these systems provide water to year-round residential communities. This left 2,802 community water systems in the dataset.
 
-The main response variable was **median household income (MHI)**. The State Water Board estimates MHI using American Community Survey data along with water-system service areas, residential parcel information, and accepted income surveys when available (California State Water Resources Control Board, 2026c). Since MHI is estimated for the service area rather than measured directly from every household, the values may not perfectly represent every household served by the system.
+The main response variable was **median household income (MHI)**. The State Water Board estimates the MHI using American Community Survey data combined with water-system service areas, residential parcel information, and accepted income surveys when available (California State Water Resources Control Board, 2026c). Since MHI is estimated for the service area rather than measured directly from every household, the values could potentially not perfectly represent every household served by the system.
 
 The explanatory variable was **primary MCL violation status**, taken from `PRIMARY_MCL_VIOLATION`. A value of `YES` means that the water system currently meets the primary MCL violation criterion used for the Failing list, while `NO` means that it does not currently meet this criterion (California State Water Resources Control Board, 2024). For the regression model, I coded this variable as
 
@@ -171,7 +210,25 @@ $$
 
 The indicator does not describe the contaminant concentration, severity, or duration of the violation.
 
-The main data-cleaning issue was missing MHI. Of the `r format(n_community, big.mark = ",")` community water systems, `r format(n_mhi_missing, big.mark = ",")` (`r scales::percent(n_mhi_missing / n_community, accuracy = 0.1)`) had missing or indeterminate MHI, leaving `r format(n_analysis, big.mark = ",")` systems for analysis. Missingness was slightly higher among systems with a primary MCL violation (`r scales::percent(missing_yes, accuracy = 0.1)`) than among systems without one (`r scales::percent(missing_no, accuracy = 0.1)`). I did not replace these missing values because there was not enough information in the dataset to do so without making additional assumptions. Other information such as system size, ownership, source-water type, and geographic region could be included in a more detailed analysis.
+The main data-cleaning issue was missing MHI. Of the `r format(n_community, big.mark = ",")` community water systems, `r format(n_mhi_missing, big.mark = ",")` (`r scales::percent(missing_overall, accuracy = 0.1)`) had missing or indeterminate MHI, leaving `r format(n_analysis, big.mark = ",")` systems for analysis. The missing-data comparison is shown in @tbl-missing; missingness was slightly higher among systems with a primary MCL violation than among systems without one. I did not replace these missing values because there was not enough information in the dataset to do so without making additional assumptions. Other information such as system size, ownership, source-water type, and geographic region could be included in a more detailed analysis.
+
+```{r tbl-missing}
+#| tbl-cap: "Missing or indeterminate MHI among eligible community water systems."
+
+missing_table <- missing_summary |>
+  transmute(
+    `Group` = group,
+    `Systems with missing MHI` = n_missing,
+    `Percent with missing MHI` = scales::percent(percent_missing, accuracy = 0.1)
+  )
+
+knitr::kable(
+  missing_table,
+  format = "latex",
+  booktabs = TRUE,
+  longtable = FALSE
+)
+```
 
 ```{r tbl-descriptive}
 #| tbl-cap: "Median household income by primary MCL violation status."
@@ -193,7 +250,7 @@ knitr::kable(
 )
 ```
 
-The final sample contains `r format(n_no, big.mark = ",")` systems without a primary MCL violation and `r format(n_yes, big.mark = ",")` systems with one. Mean MHI is `r money(mean_no)` for systems without a violation and `r money(mean_yes)` for systems with a violation. The medians show the same pattern: `r money(median_no)` compared with `r money(median_yes)`.
+The final sample contains `r format(n_no, big.mark = ",")` systems without a primary MCL violation and `r format(n_yes, big.mark = ",")` systems with one. Mean MHI is `r money(mean_no)` for systems without a violation and `r money(mean_yes)` for systems with a violation. The medians show the same pattern: `r money(median_no)` compared with `r money(median_yes)`. The groups are highly unequal in size, so estimates for the smaller violation group have less precision.
 
 ```{r fig-mhi-boxplot}
 #| fig-cap: "Estimated service-area MHI by primary MCL violation status. Boxes show the median and interquartile range; points are individual systems, and diamonds show group means."
@@ -212,7 +269,7 @@ ggplot(analysis, aes(x = mcl_status, y = mhi)) +
   )
 ```
 
-@fig-mhi-boxplot shows that MHI is generally lower for systems with a primary MCL violation, although there is substantial variation within both groups. This suggests that violation status is related to average MHI but does not explain income differences by itself.
+@fig-mhi-boxplot shows that MHI is generally lower for systems with a primary MCL violation, although there is substantial variation within both groups. The pattern is consistent with an association between violation status and average MHI, while the within-group spread indicates that violation status is not sufficient to explain income differences by itself.
 
 # Methods {#sec-methods}
 
@@ -236,19 +293,20 @@ $$
 
 The test used a significance level of $\alpha=0.05$. I also calculated a 95% confidence interval and $R^2$ to evaluate the size of the difference and how much of the variation in MHI is explained by violation status.
 
-The regression assumptions were also checked before interpreting the results. Since the predictor only has two groups, the linearity assumption is less of a concern than it would be with a continuous predictor. However, the groups do not have exactly the same variation in MHI, and the residuals are somewhat right-skewed. Independence may also not be perfect because nearby water systems can have similar economic and geographic conditions. In addition, some community systems have missing MHI values, which may affect how representative the final sample is.
+The regression assumptions were also checked before interpreting the results. Since the predictor only has two groups, the linearity assumption is less of a concern than it would be with a continuous predictor. However, the groups do not have exactly the same variation in MHI, and the residuals are somewhat right-skewed. Independence may also not be perfect because nearby water systems can have similar economic and geographic conditions. In addition, some community systems have missing MHI values, which may affect how representative the final sample is. Because the group sizes and variances differ, I also calculated HC3 heteroskedasticity-robust standard errors for the same model as a sensitivity check. The ordinary least-squares fit remains the main model; the HC3 calculation changes the estimated uncertainty rather than the coefficient estimates.
 
-No model selection was needed because the analysis only uses one explanatory variable based directly on the research question. I checked the model using residual plots and a sensitivity analysis that removed MHI values recorded at the ACS boundaries of \$2,500 and \$250,000. All data cleaning, analysis, and figures were completed in R (R Core Team, 2026) using the `tidyverse`, `ggpubr`, and `gridExtra` packages.
+No model selection was needed because the analysis only uses one explanatory variable based directly on the research question. I checked the model using residual plots and sensitivity analyses that removed MHI values recorded at the ACS boundaries of \$2,500 and \$250,000 and recalculated the standard errors using HC3. All data cleaning, analysis, and figures were completed in R (R Core Team, 2026) using the `tidyverse`, `ggpubr`, `gridExtra`, `sandwich`, `scales`, and `knitr` packages.
 
 # Results {#sec-results}
 
 ```{r tbl-regression}
-#| tbl-cap: "Simple linear regression results for MHI and primary MCL violation status."
+#| tbl-cap: "Simple linear regression results with ordinary least-squares and HC3 standard errors."
 
 regression_table <- tibble(
   Term = c("No violation", "Violation"),
   Estimate = c(coef(model)[1], coef(model)[2]),
-  SE = model_sum$coefficients[, 2],
+  `OLS SE` = model_sum$coefficients[, 2],
+  `HC3 SE` = robust_se,
   `95% CI` = c(
     paste0("[", round(model_ci[1, 1], 3), ", ", round(model_ci[1, 2], 3), "]"),
     paste0("[", round(model_ci[2, 1], 3), ", ", round(model_ci[2, 2], 3), "]")
@@ -261,7 +319,8 @@ regression_table <- tibble(
 ) |>
   mutate(
     Estimate = round(Estimate, 3),
-    SE = round(SE, 3)
+    `OLS SE` = round(`OLS SE`, 3),
+    `HC3 SE` = round(`HC3 SE`, 3)
   )
 
 knitr::kable(
@@ -269,7 +328,7 @@ knitr::kable(
   format = "latex",
   booktabs = TRUE,
   longtable = FALSE,
-  align = c("l", "c", "c", "c", "c")
+  align = c("l", "c", "c", "c", "c", "c")
 )
 ```
 
@@ -281,9 +340,9 @@ $$
 
 The intercept represents an estimated mean MHI of `r money(b0 * 10000)` for systems without a primary MCL violation. The slope shows that systems with a primary MCL violation have an estimated mean MHI **`r money(abs(slope_dollars))` lower** than systems without one.
 
-The 95% confidence interval for the difference is from `r money(ci_dollars_low)` to `r money(ci_dollars_high)`. The test statistic is $t=`r round(t_b1, 2)`$ with `r df.residual(model)` degrees of freedom, and the p-value is `r ifelse(p_b1 < 0.001, "below 0.001", round(p_b1, 3))`. At $\alpha=0.05$, I reject $H_0$. This shows that primary MCL violation status is significantly related to service-area MHI in this dataset.
+The 95% confidence interval for the difference is from `r money(ci_dollars_low)` to `r money(ci_dollars_high)`. The test statistic is $t=`r round(t_b1, 2)`$ with `r df.residual(model)` degrees of freedom, and the p-value is `r ifelse(p_b1 < 0.001, "below 0.001", round(p_b1, 3))`. At $\alpha=0.05$, I reject $H_0$. Primary MCL violation status is significantly related to service-area MHI in this dataset.
 
-However, the model has an $R^2$ of only `r round(r2, 3)`, meaning that violation status explains about `r scales::percent(r2, accuracy = 0.1)` of the observed variation in MHI. This shows that the two groups have different average MHI values, but violation status alone does not explain most of the income differences between water systems.
+However, the model has an $R^2$ of only `r round(r2, 3)`, meaning that violation status explains about `r scales::percent(r2, accuracy = 0.1)` of the observed variation in MHI. In substantive terms, the groups have different average MHI values, but violation status alone leaves most of the income differences between water systems unexplained.
 
 ```{r fig-diagnostics}
 #| fig-cap: "Regression diagnostics showing residuals by violation status and a normal Q-Q plot."
@@ -318,17 +377,19 @@ p_qq <- ggplot(model_diagnostics, aes(sample = residual)) +
 gridExtra::grid.arrange(p_resid, p_qq, ncol = 2)
 ```
 
-The diagnostic plots show some differences in variance between the groups and some deviation from normality in the upper tail. The sample standard deviations are `r money(sd_no)` for the no-violation group and `r money(sd_yes)` for the violation group. This means the regression assumptions are not perfectly satisfied, so the results should be interpreted with some caution.
+The diagnostic plots show some differences in variance between the groups and some deviation from normality in the upper tail. The sample standard deviations are `r money(sd_no)` for the no-violation group and `r money(sd_yes)` for the violation group. Together, these patterns indicate that the regression assumptions are not perfectly satisfied, so the results should be interpreted with some caution.
 
-As a sensitivity check, I removed the `r n_low_endpoint + n_high_endpoint` systems recorded at exactly \$2,500 or \$250,000 and fit the model again. The estimated difference remained `r money(abs(sensitivity_slope))` lower for systems with a primary MCL violation, with a 95% confidence interval from `r money(sensitivity_ci_low)` to `r money(sensitivity_ci_high)` and a p-value `r ifelse(sensitivity_p < 0.001, "below 0.001", round(sensitivity_p, 3))`. This suggests that the extreme boundary values are not driving the main result.
+To assess whether unequal variances materially affect inference, I recalculated the standard errors using HC3 heteroskedasticity-robust standard errors. The HC3 standard error for the violation coefficient was `r money(robust_se_b1 * 10000)`, compared with `r money(ols_se_b1 * 10000)` under ordinary least squares. The HC3 p-value was `r ifelse(robust_p_b1 < 0.001, "below 0.001", round(robust_p_b1, 3))`, so the conclusion is unchanged: I still reject $H_0$ at $\alpha=0.05$.
+
+As a sensitivity check, I removed the `r n_low_endpoint + n_high_endpoint` systems recorded at exactly \$2,500 or \$250,000 and fit the model again. The estimated difference remained `r money(abs(sensitivity_slope))` lower for systems with a primary MCL violation, with a 95% confidence interval from `r money(sensitivity_ci_low)` to `r money(sensitivity_ci_high)` and a p-value `r ifelse(sensitivity_p < 0.001, "below 0.001", round(sensitivity_p, 3))`. The similar estimate and p-value indicate that the extreme boundary values are not driving the main result.
 
 # Discussion {#sec-discussion}
 
-This analysis found that California community water systems with a current primary MCL violation serve areas with lower estimated median household income on average. In the September 22, 2026 SAFER dataset, the estimated difference was approximately `r money(abs(slope_dollars))`. The median comparison and sensitivity analysis showed the same overall pattern. These results are consistent with previous research connecting drinking-water compliance problems with socioeconomic disadvantage (Balazs et al., 2012; California State Water Resources Control Board, 2026a).
+This analysis found that California community water systems with a current primary MCL violation tend to serve areas with lower estimated median household income on average. The mean and median comparisons showed the same general pattern, and the boundary-value sensitivity analysis and HC3 standard-error check gave similar results. This suggests that the overall relationship was not strongly affected by these specific analytical decisions. The results show that socioeconomic conditions may be one factor to consider when agencies examine compliance problems or decide where technical assistance and infrastructure support may be needed. However, household income should not be treated as a strong predictor of MCL violations by itself because the model explained only a small amount of the differences between water systems. Overall, these findings are also consistent with previous research showing a relationship between drinking-water compliance problems and socioeconomic disadvantage (Balazs et al., 2012; California State Water Resources Control Board, 2026a).
 
-There are several limitations to this analysis. The results do not show that lower household income directly causes MCL violations because the data are observational. The model also does not include other factors such as system size, ownership, source-water type, geographic region, infrastructure, or contaminant type. Missing MHI values are another limitation, and MHI itself is estimated using ACS and geographic data rather than directly measured from every household. The violation variable also does not show the severity or duration of a violation.
+There are several limitations to this analysis. The most important one is that this design does show that lower household income directly causes MCL violations. The approach could also affect how representative the results are because systems with missing MHI values may be different from the systems that had usable income data. If the missing values are related to income, violation status, or other factors, this could impact the difference that is observed between these two groups. Additionally, the MHI is not measured directly from every household and is instead estimated using ACS and geographic data. The violation group was also smaller, which means that the statistics for this group could be less precise. Furthermore, the model does not account for other factors such as system size, ownership, source-water type, geographic region, infrastructure, or contaminant type. The violation variable also only shows whether a violation occurred and does not include information about how severe the violation was or how long it lasted.
 
-The model explains only a small portion of the overall variation in MHI. In the future, the analysis could be improved by using multiple regression to include factors such as system size, ownership, and region. Another option would be to model violation status as the response or analyze different contaminants separately. These additions could help explain more of the differences between water systems.
+In the future, this analysis could be improved by including more variables and using more advanced models. A multiple regression model could include system size, ownership, geographic region, and other possible confounding variables. Violation status could also be used as the response variable, or we could examine different contaminants separately to determine if certain conditions are more strongly related to compliance problems. These approaches could help determine if the differences between water systems are mainly associated with socioeconomic factors or with other features of a system itself.
 
 # References
 

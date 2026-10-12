@@ -7,6 +7,8 @@ Date of submission: September 27, 2026
 
 This project uses simple linear regression to examine whether service-area median household income (MHI) differs between California community water systems with and without a current primary maximum contaminant level (MCL) violation.
 
+Project repository: https://github.com/yasamanebrahimi-byte/Math261AProject1
+
 ## Repository Structure
 
 - `README.md` — project description and reproducibility information
@@ -20,6 +22,10 @@ The data comes from the California State Water Resources Control Board's **Drink
 
 Dataset page: https://lab.data.ca.gov/dataset/safer-failing-and-at-risk-drinking-water-systems
 
+## Dataset License
+
+The SAFER dataset is listed on the California Open Data page with the license **Other (Public Domain)**.
+
 ## Reproducing the Report
 
 1. Open `paper1draft1.qmd` in RStudio or another Quarto-compatible R environment.
@@ -27,12 +33,8 @@ Dataset page: https://lab.data.ca.gov/dataset/safer-failing-and-at-risk-drinking
 3. Open `paper1draft1.qmd`.
 4. Render the Quarto file to PDF.
 
-The analysis uses R and the `tidyverse`, `ggpubr`, `gridExtra`, `scales`, and `knitr` packages.
+The analysis uses R and the `tidyverse`, `ggpubr`, `gridExtra`, `sandwich`, `scales`, and `knitr` packages.
 
 ## External Resources
 
 I used ChatGPT to help with making sure the citations were in the right format, and also used codex to install the dependencies for this project.
-
-## Dataset License
-
-The SAFER dataset is listed on the California Open Data page with the license “Other (Public Domain).”
