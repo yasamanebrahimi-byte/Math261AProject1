@@ -1,0 +1,629 @@
+---
+title: "Primary MCL Violations and Service-Area Income in California Community Water Systems"
+author: "Yasaman Ebrahimi"
+date: today
+date-format: long
+
+abstract: "This paper examines how service-area median household income (MHI) differs between California community water systems with and without a current primary maximum contaminant level (MCL) violation. I first compare the two groups directly and then fit an expanded multiple linear regression with MHI as the response and violation status, system size, owner type, and regional board as predictors. Among 2,156 systems with usable MHI data, systems with a primary MCL violation had an estimated mean MHI about 25,456 dollars lower before adjustment. After adjustment, the estimated difference was about 14,045 dollars lower (95% HC3 CI: 5,721 to 22,368 dollars lower; p = 0.001). A log-MHI sensitivity analysis gave a weaker result, so the association should be interpreted as descriptive rather than causal."
+
+format:
+  pdf:
+    keep-tex: false
+    documentclass: article
+    indent: true
+    include-in-header:
+      - text: |
+          \usepackage{indentfirst}
+          \usepackage{ragged2e}
+          \setlength{\parindent}{1.5em}
+          \setlength{\RaggedRightParindent}{1.5em} % Sets indentation for ragged-right text
+          \RaggedRight
+
+number-sections: true
+
+execute:
+  echo: false
+  warning: false
+  message: false
+---
+
+```{r}
+#| include: false
+
+library(tidyverse)
+library(ggpubr)
+library(sandwich)
+
+options(scipen = 999)
+theme_set(theme_pubr())
+
+money <- function(x) {
+  amount <- format(abs(round(x)), big.mark = ",", scientific = FALSE, trim = TRUE)
+  ifelse(x < 0, paste0("-\\$", amount), paste0("\\$", amount))
+}
+
+data_path <- Sys.getenv("SAFER_DATA_PATH", unset = "SAFER_RA.csv")
+
+if (!file.exists(data_path) && file.exists(file.path("data", "SAFER_RA.csv"))) {
+  data_path <- file.path("data", "SAFER_RA.csv")
+}
+
+if (!file.exists(data_path)) {
+  stop(
+    paste0(
+      "SAFER_RA.csv was not found. Download the current public flat file from ",
+      "https://lab.data.ca.gov/dataset/safer-failing-and-at-risk-drinking-water-systems ",
+      "and place it next to this .qmd file, or set the SAFER_DATA_PATH environment variable."
+    )
+  )
+}
+
+safer_raw <- read_csv(data_path, show_col_types = FALSE)
+
+n_raw <- nrow(safer_raw)
+n_columns <- ncol(safer_raw)
+snapshot_date <- unique(safer_raw$CREATED_DATE)
+
+safer <- safer_raw |>
+  mutate(
+    mhi = parse_number(MHI, na = c("NA", "Missing/Indeterminate")),
+    mcl_violation = if_else(PRIMARY_MCL_VIOLATION == "YES", 1, 0),
+    mcl_status = factor(
+      PRIMARY_MCL_VIOLATION,
+      levels = c("NO", "YES"),
+      labels = c("No primary MCL violation", "Primary MCL violation")
+    )
+  )
+
+community <- safer |>
+  filter(FEDERAL_CLASSIFICATION_TYPE == "COMMUNITY")
+
+analysis <- community |>
+  filter(!is.na(mhi), !is.na(mcl_status)) |>
+  mutate(
+    mhi_10k = mhi / 10000,
+    log_mhi = log(mhi),
+    log_connections = log10(SERVICE_CONNECTIONS),
+    owner_type = relevel(factor(OWNER_TYPE), ref = "PRIVATE"),
+    regional_board = relevel(
+      factor(REGIONAL_BOARD),
+      ref = "Region 5 Central Valley (Fresno Office)"
+    )
+  )
+
+n_community <- nrow(community)
+n_analysis <- nrow(analysis)
+n_no <- sum(analysis$mcl_violation == 0)
+n_yes <- sum(analysis$mcl_violation == 1)
+
+missing_summary <- bind_rows(
+  community |>
+    summarize(
+      group = "Overall",
+      n_total = n(),
+      n_missing = sum(is.na(mhi))
+    ),
+  community |>
+    filter(PRIMARY_MCL_VIOLATION == "YES") |>
+    summarize(
+      group = "Violation",
+      n_total = n(),
+      n_missing = sum(is.na(mhi))
+    ),
+  community |>
+    filter(PRIMARY_MCL_VIOLATION == "NO") |>
+    summarize(
+      group = "No violation",
+      n_total = n(),
+      n_missing = sum(is.na(mhi))
+    )
+) |>
+  mutate(percent_missing = n_missing / n_total)
+
+n_mhi_missing <- missing_summary$n_missing[missing_summary$group == "Overall"]
+missing_overall <- missing_summary$percent_missing[missing_summary$group == "Overall"]
+missing_yes <- missing_summary$percent_missing[missing_summary$group == "Violation"]
+missing_no <- missing_summary$percent_missing[missing_summary$group == "No violation"]
+
+n_mhi_missing_miss_indet <- sum(
+  is.na(community$mhi) & community$SERVICE_AREA_ECONOMIC_STATUS == "Miss/Indet",
+  na.rm = TRUE
+)
+n_mhi_missing_status_unavailable <- sum(
+  is.na(community$mhi) & is.na(community$SERVICE_AREA_ECONOMIC_STATUS)
+)
+
+n_low_endpoint <- sum(analysis$mhi == 2500)
+n_high_endpoint <- sum(analysis$mhi == 250000)
+size_corr <- cor(analysis$SERVICE_CONNECTIONS, analysis$POPULATION)
+
+group_summary <- analysis |>
+  group_by(mcl_status) |>
+  summarize(
+    n = n(),
+    mean = mean(mhi),
+    median = median(mhi),
+    sd = sd(mhi),
+    .groups = "drop"
+  )
+
+mean_no <- group_summary$mean[group_summary$mcl_status == "No primary MCL violation"]
+mean_yes <- group_summary$mean[group_summary$mcl_status == "Primary MCL violation"]
+median_no <- group_summary$median[group_summary$mcl_status == "No primary MCL violation"]
+median_yes <- group_summary$median[group_summary$mcl_status == "Primary MCL violation"]
+sd_no <- group_summary$sd[group_summary$mcl_status == "No primary MCL violation"]
+sd_yes <- group_summary$sd[group_summary$mcl_status == "Primary MCL violation"]
+
+model <- lm(mhi_10k ~ mcl_violation, data = analysis)
+model_sum <- summary(model)
+model_ci <- confint(model, level = 0.95)
+
+b0 <- unname(coef(model)[1])
+b1 <- unname(coef(model)[2])
+t_b1 <- model_sum$coefficients[2, 3]
+p_b1 <- model_sum$coefficients[2, 4]
+r2 <- model_sum$r.squared
+
+robust_vcov <- sandwich::vcovHC(model, type = "HC3")
+robust_se <- sqrt(diag(robust_vcov))
+robust_ci <- cbind(
+  coef(model) - qt(0.975, df = df.residual(model)) * robust_se,
+  coef(model) + qt(0.975, df = df.residual(model)) * robust_se
+)
+ols_se_b1 <- model_sum$coefficients[2, 2]
+robust_se_b1 <- robust_se[2]
+robust_t_b1 <- b1 / robust_se_b1
+robust_p_b1 <- 2 * pt(
+  abs(robust_t_b1),
+  df = df.residual(model),
+  lower.tail = FALSE
+)
+
+ci_b1_low <- model_ci[2, 1]
+ci_b1_high <- model_ci[2, 2]
+
+slope_dollars <- b1 * 10000
+ci_dollars_low <- ci_b1_low * 10000
+ci_dollars_high <- ci_b1_high * 10000
+
+adjusted_model <- lm(
+  mhi_10k ~ mcl_violation + log_connections + owner_type + regional_board,
+  data = analysis
+)
+adjusted_model_sum <- summary(adjusted_model)
+adjusted_robust_vcov <- sandwich::vcovHC(adjusted_model, type = "HC3")
+adjusted_robust_se <- sqrt(diag(adjusted_robust_vcov))
+
+adjusted_b1 <- unname(coef(adjusted_model)["mcl_violation"])
+adjusted_t_b1 <- adjusted_b1 / adjusted_robust_se["mcl_violation"]
+adjusted_p_b1 <- 2 * pt(
+  abs(adjusted_t_b1),
+  df = df.residual(adjusted_model),
+  lower.tail = FALSE
+)
+adjusted_ci_b1 <- adjusted_b1 + c(-1, 1) * qt(
+  0.975,
+  df = df.residual(adjusted_model)
+) * adjusted_robust_se["mcl_violation"]
+adjusted_log_connections_b1 <- unname(coef(adjusted_model)["log_connections"])
+adjusted_log_connections_ci <- adjusted_log_connections_b1 + c(-1, 1) * qt(
+  0.975,
+  df = df.residual(adjusted_model)
+) * adjusted_robust_se["log_connections"]
+adjusted_log_connections_p <- 2 * pt(
+  abs(adjusted_log_connections_b1 / adjusted_robust_se["log_connections"]),
+  df = df.residual(adjusted_model),
+  lower.tail = FALSE
+)
+
+adjusted_slope_dollars <- adjusted_b1 * 10000
+adjusted_ci_dollars_low <- adjusted_ci_b1[1] * 10000
+adjusted_ci_dollars_high <- adjusted_ci_b1[2] * 10000
+adjusted_r2 <- adjusted_model_sum$r.squared
+adjusted_adj_r2 <- adjusted_model_sum$adj.r.squared
+
+log_model <- lm(
+  log_mhi ~ mcl_violation + log_connections + owner_type + regional_board,
+  data = analysis
+)
+log_model_sum <- summary(log_model)
+log_robust_vcov <- sandwich::vcovHC(log_model, type = "HC3")
+log_robust_se <- sqrt(diag(log_robust_vcov))
+log_b1 <- unname(coef(log_model)["mcl_violation"])
+log_t_b1 <- log_b1 / log_robust_se["mcl_violation"]
+log_p_b1 <- 2 * pt(
+  abs(log_t_b1),
+  df = df.residual(log_model),
+  lower.tail = FALSE
+)
+log_ci_b1 <- log_b1 + c(-1, 1) * qt(
+  0.975,
+  df = df.residual(log_model)
+) * log_robust_se["mcl_violation"]
+log_percent_change <- (exp(log_b1) - 1) * 100
+log_percent_ci_low <- (exp(log_ci_b1[1]) - 1) * 100
+log_percent_ci_high <- (exp(log_ci_b1[2]) - 1) * 100
+
+sensitivity <- analysis |>
+  filter(mhi > 2500, mhi < 250000)
+
+sensitivity_model <- lm(
+  mhi_10k ~ mcl_violation + log_connections + owner_type + regional_board,
+  data = sensitivity
+)
+sensitivity_robust_vcov <- sandwich::vcovHC(sensitivity_model, type = "HC3")
+sensitivity_robust_se <- sqrt(diag(sensitivity_robust_vcov))
+sensitivity_b1 <- unname(coef(sensitivity_model)["mcl_violation"])
+sensitivity_ci <- sensitivity_b1 + c(-1, 1) * qt(
+  0.975,
+  df = df.residual(sensitivity_model)
+) * sensitivity_robust_se["mcl_violation"]
+sensitivity_p <- 2 * pt(
+  abs(sensitivity_b1 / sensitivity_robust_se["mcl_violation"]),
+  df = df.residual(sensitivity_model),
+  lower.tail = FALSE
+)
+
+sensitivity_slope <- sensitivity_b1 * 10000
+sensitivity_ci_low <- sensitivity_ci[1] * 10000
+sensitivity_ci_high <- sensitivity_ci[2] * 10000
+
+model_diagnostics <- analysis |>
+  mutate(
+    fitted = fitted(adjusted_model),
+    residual = resid(adjusted_model)
+  )
+
+adjusted_resid_sd_no <- sd(
+  model_diagnostics$residual[model_diagnostics$mcl_violation == 0]
+)
+adjusted_resid_sd_yes <- sd(
+  model_diagnostics$residual[model_diagnostics$mcl_violation == 1]
+)
+```
+
+**Project repository:** [github.com/yasamanebrahimi-byte/Math261AProject1](https://github.com/yasamanebrahimi-byte/Math261AProject1)
+
+# Introduction
+
+California public drinking water systems serve communities with different socioeconomic conditions and different levels of water-quality compliance. A maximum contaminant level (MCL) is a regulatory limit on how much of a contaminant can be present in drinking water. Under California's Failing Water System criteria, a primary MCL violation with an open enforcement action can place a system on the Failing list (California State Water Resources Control Board, 2024). Because primary MCLs are health-based standards, it is useful to ask whether systems serving communities with different income levels also experience different compliance outcomes.
+
+Previous research has connected drinking water compliance with socioeconomic conditions. Allaire, Wu, and Lall (2018) linked health-based violations to several community and system characteristics across the United States. In California's San Joaquin Valley, Balazs et al. (2012) reported that arsenic violations were more common among systems serving disadvantaged populations. The State Water Board's 2026 Needs Assessment also reports that Failing and At-Risk systems are more likely to serve disadvantaged communities (California State Water Resources Control Board, 2026a). These studies provide a reason to examine income and compliance together in the SAFER data.
+
+This research questions for this paper are: **How does service-area median household income differ between California community water systems with and without a current primary MCL violation, and how much does that difference change after accounting for system size, ownership, and geographic region?** For the methodology, I directly compare the groups of water systems with a primary MCL violation to the ones without. I then use an expanded multiple linear regression to see whether the difference remains after adding the other system characteristics. The results show lower estimated MHI among systems with a primary MCL violation, although the adjusted difference is smaller and the model still explains only part of the variation in income.
+
+# Data {#sec-data}
+
+This data is a snapshot of the California State Water Resources Control Board’s Drinking Water - SAFER Dashboard Failing and At-Risk Drinking Water Systems dataset from the month of September (California State Water Resources Control Board, 2026b). The snapshot contains `r format(n_raw, big.mark = ",")` water systems and `r n_columns` variables total. The `CREATED_DATE` field shows that the snapshot date is `r paste(snapshot_date, collapse = ", ")`. I restricted the analysis to community water systems because MHI data can only be collected from residential communities, excluding 388 non-community systems and leaving `r format(n_community, big.mark = ",")` community systems.
+
+For this paper, a water system is defined as a regulated network and its related facilities that provide drinking water to a service area. Some systems serve a small community, while others serve many residents. This data also records service connections, population served, owner type, and regional board, which are explanatory variables that can be used to compare systems.
+
+The response variable was **median household income (MHI)**. The State Water Board estimates MHI using American Community Survey data, water-system service areas, residential parcel information, and accepted income surveys when available (California State Water Resources Control Board, 2026c). MHI is therefore a service-area estimate, not a value measured directly from every household. It may not perfectly represent all households served by a system.
+
+The main explanatory variable was **primary MCL violation status**, taken from `PRIMARY_MCL_VIOLATION`. A value of `YES` means that the system currently meets the primary MCL violation criterion used for the Failing list. A value of `NO` means that it does not meet this criterion (California State Water Resources Control Board, 2024). I coded the variable as
+
+$$
+X_i =
+\begin{cases}
+1, & \text{if system }i\text{ has a primary MCL violation},\\
+0, & \text{otherwise.}
+\end{cases}
+$$
+
+This indicator only records whether the criterion was met. It does not describe the contaminant concentration, severity, or duration of the violation.
+
+Missing MHI was the main cleaning issue. Of the `r format(n_community, big.mark = ",")` community water systems, 646 (`r scales::percent(missing_overall, accuracy = 0.1)`) had missing or indeterminate MHI and were excluded, leaving 2,156 systems for the analysis. The missing-data comparison is shown in @tbl-missing, and the percentage was slightly higher among systems with a primary MCL violation.
+
+The specific cause of missing MHI is unknown for individual systems; the data does not give a reason for each missing value. Among the systems with missing MHI, `r format(n_mhi_missing_miss_indet, big.mark = ",")` were also recorded as `Miss/Indet` under `SERVICE_AREA_ECONOMIC_STATUS`, while `r format(n_mhi_missing_status_unavailable, big.mark = ",")` had no recorded value for this variable. The State Water Board explains that an indeterminate value means there is not enough geographic data to make a reliable MHI estimate. This can happen when there are fewer than 15 residential tax parcels in the area where the service area and census geography overlap, or when MHI data is not available for that census area (California State Water Resources Control Board, 2026c). This suggests that the missing values are mainly due to limitations in the available data and how MHI is estimated, rather than households not reporting their income. I excluded the systems with missing MHI from the analysis because there was not enough information to estimate these values without making additional assumptions.
+
+```{r tbl-missing}
+#| tbl-cap: "Missing or indeterminate MHI among eligible community water systems."
+
+missing_table <- missing_summary |>
+  transmute(
+    `Group` = group,
+    `Systems with missing MHI` = n_missing,
+    `Percent with missing MHI` = scales::percent(percent_missing, accuracy = 0.1)
+  )
+
+knitr::kable(
+  missing_table,
+  format = "latex",
+  booktabs = TRUE,
+  longtable = FALSE
+)
+```
+
+```{r tbl-descriptive}
+#| tbl-cap: "Median household income by primary MCL violation status."
+
+summary_table <- group_summary |>
+  transmute(
+    `Primary MCL status` = mcl_status,
+    `n` = n,
+    `Mean MHI` = scales::dollar(mean, accuracy = 1),
+    `Median MHI` = scales::dollar(median, accuracy = 1),
+    `SD` = scales::dollar(sd, accuracy = 1)
+  )
+
+knitr::kable(
+  summary_table,
+  format = "latex",
+  booktabs = TRUE,
+  longtable = FALSE
+)
+```
+
+The final sample contains `r format(n_no, big.mark = ",")` systems without a primary MCL violation and `r format(n_yes, big.mark = ",")` systems with one. The systems without a violation had a mean MHI of `r money(mean_no)`, compared to `r money(mean_yes)` for systems with a violation. The median MHI also shows a similar difference, with `r money(median_no)` for systems without a violation and `r money(median_yes)` for systems with one. Since the violation group is much smaller, its estimates are less precise.
+
+```{r fig-mhi-boxplot}
+#| fig-cap: "Estimated service-area MHI by primary MCL violation status. Boxes show the median and interquartile range; points are individual systems, and diamonds show group means."
+#| fig-width: 7
+#| fig-height: 4.5
+
+ggplot(analysis, aes(x = mcl_status, y = mhi)) +
+  geom_boxplot(outlier.shape = NA, width = 0.55) +
+  geom_jitter(width = 0.12, alpha = 0.18, size = 0.8) +
+  stat_summary(fun = mean, geom = "point", shape = 18, size = 3.5) +
+  scale_y_continuous(labels = scales::label_dollar(scale = 0.001, suffix = "K")) +
+  labs(
+    x = NULL,
+    y = "Estimated service-area median household income",
+    title = "MHI is lower on average among systems with a primary MCL violation"
+  )
+```
+
+The boxplot in @fig-mhi-boxplot shows that systems with a primary MCL violation generally have lower MHI, although there is still a lot of variation within both groups. This shows that there is a relationship between violation status and income, but violation status alone does not explain all the differences in MHI between water systems.
+
+# Methods {#sec-methods}
+
+I used two related linear regression models. The first model compares MHI with primary MCL violation status only. Because a 0/1 predictor with an intercept gives the mean for each group, it is numerically the same as comparing the two sample means. I use this model as a baseline, while the second model evaluates whether the difference remains after adding other system characteristics.
+
+MHI was divided by 10,000 before fitting the dollar-scale models so that the coefficients would be easier to read. Let $Y_i$ represent estimated MHI, in units of 10,000 dollars, for system $i$, and let $X_i$ represent its primary MCL violation status. The baseline model is
+
+$$
+Y_i = \beta_0 + \beta_1X_i + \varepsilon_i.
+$$
+
+Here, $\beta_0$ is the average MHI for systems without a primary MCL violation. The coefficient $\beta_1$ is the difference between the two groups. A negative value means that systems with a primary MCL violation have lower average MHI.
+
+The second model adds system size, owner type, and geographic region:
+
+$$
+Y_i = \beta_0 + \beta_1X_i + \beta_2S_i + \gamma_{O_i} + \delta_{R_i} + \varepsilon_i,
+$$
+
+In this equation, $S_i=\log_{10}(\text{service connections})$, $O_i$ is owner type, and $R_i$ is regional board. I used service connections as the size measure because service connections and population were highly correlated in the analysis sample (`r round(size_corr, 3)`). Including both would add two closely related size measures. The categorical factors were chosen as controls before fitting the model, rather than selected by their p-values. Private owner was the reference owner type, and Region 5 Central Valley (Fresno Office) was the reference regional board. The log transformation reduces the influence of the largest systems, and a one-unit increase represents a tenfold increase in service connections.
+
+Because the objective is descriptive, the group means and regression coefficients answer the descriptive question; p-values and confidence intervals are supplementary model-based measures of uncertainty and are not necessary for inference about the observed systems. I report the following model-based null and alternative only as a supplementary check:
+
+$$
+H_0:\beta_1=0
+\qquad \text{versus} \qquad
+H_A:\beta_1\neq0.
+$$
+
+This analysis does not use a broader population for inference. Instead, I focus on the eligible California community water systems in the SAFER snapshot. The regression models use the `r format(n_analysis, big.mark = ",")` systems with available MHI data. The test checks whether the violation coefficient is zero in the linear model, using the variation in the residuals to estimate uncertainty. Since this data is not a random sample, the results are only for the systems in this snapshot and do not necessarily apply to future systems. I used a significance level of $\alpha=0.05$ as a standard cutoff, although the p-values are not the main focus of the analysis. Instead, I focus more on the estimated differences, how they change after adding the other variables, and how much variation the model explains. I also calculated 95% confidence intervals, $R^2$, and adjusted $R^2$ to help compare the models.
+
+Before interpreting the results, I checked the regression assumptions. The MHI values are right-skewed, there are fewer systems in the violation group, and systems in nearby areas may have similar economic or geographic characteristics. The model also does not include other factors such as infrastructure, source-water type, and contaminant type. Since the residual variance is not constant, I used HC3 robust standard errors to account for unequal variances. HC3 adjusts the residuals based on leverage, which makes the uncertainty estimates less sensitive to unequal variance and observations that have a large influence on the model. This does not change the estimated coefficients.
+
+I also ran two additional checks to see whether the results remain similar. First, I used the expanded regression model with $\log(\mathrm{MHI})$ instead of MHI as the response variable. This allows the violation coefficient to be interpreted as an approximate percentage difference rather than a dollar difference. Second, I ran the dollar-scale model again after removing MHI values at the ACS-based limits of $\$2,500$ and $\$250,000$. This checks whether these boundary values have a large effect on the results, while the main analysis still includes all recorded values. I did not include `SERVICE_AREA_ECONOMIC_STATUS` because it uses the same economic information as MHI, which would repeat information already included in the response variable. I also left out `CURRENT_FAILING` and `FINAL_SAFER_STATUS` because they incorporate the violation criteria and could put a downstream measure of violation into the model.
+
+I completed the analysis in R (R Core Team, 2026) with `tidyverse`, `ggpubr`, `gridExtra`, `sandwich`, `scales`, and `knitr`.
+
+# Results {#sec-results}
+
+```{r tbl-regression}
+#| tbl-cap: "Unadjusted binary-predictor regression results. OLS and HC3 confidence intervals use ordinary least-squares and HC3 standard errors, respectively."
+
+regression_table <- tibble(
+  Term = c("No violation", "Violation"),
+  Estimate = c(coef(model)[1], coef(model)[2]),
+  `OLS SE` = model_sum$coefficients[, 2],
+  `HC3 SE` = robust_se,
+  `OLS 95% CI` = c(
+    paste0("[", round(model_ci[1, 1], 3), ", ", round(model_ci[1, 2], 3), "]"),
+    paste0("[", round(model_ci[2, 1], 3), ", ", round(model_ci[2, 2], 3), "]")
+  ),
+  `HC3 95% CI` = c(
+    paste0("[", round(robust_ci[1, 1], 3), ", ", round(robust_ci[1, 2], 3), "]"),
+    paste0("[", round(robust_ci[2, 1], 3), ", ", round(robust_ci[2, 2], 3), "]")
+  ),
+  `OLS p` = if_else(
+    model_sum$coefficients[, 4] < 0.001,
+    "< 0.001",
+    sprintf("%.3f", model_sum$coefficients[, 4])
+  )
+) |>
+  mutate(
+    Estimate = round(Estimate, 3),
+    `OLS SE` = round(`OLS SE`, 3),
+    `HC3 SE` = round(`HC3 SE`, 3)
+  )
+
+knitr::kable(
+  regression_table,
+  format = "latex",
+  booktabs = TRUE,
+  longtable = FALSE,
+  align = c("l", "c", "c", "c", "c", "c", "c")
+)
+```
+
+```{r tbl-adjusted-regression}
+#| tbl-cap: "Key terms from the expanded multiple regression. MHI is measured in units of $10,000, and confidence intervals and p-values use HC3 standard errors."
+
+adjusted_table <- tibble(
+  Term = c("Primary MCL violation", "log10(service connections)"),
+  Estimate = c(
+    adjusted_b1,
+    adjusted_log_connections_b1
+  ),
+  `OLS SE` = adjusted_model_sum$coefficients[
+    c("mcl_violation", "log_connections"),
+    2
+  ],
+  `HC3 SE` = adjusted_robust_se[c("mcl_violation", "log_connections")],
+  `95% CI` = c(
+    paste0(
+      "[",
+      round(adjusted_ci_b1[1], 3),
+      ", ",
+      round(adjusted_ci_b1[2], 3),
+      "]"
+    ),
+    paste0(
+      "[",
+      round(adjusted_log_connections_ci[1], 3),
+      ", ",
+      round(adjusted_log_connections_ci[2], 3),
+      "]"
+    )
+  ),
+  p = c(
+    ifelse(adjusted_p_b1 < 0.001, "< 0.001", sprintf("%.3f", adjusted_p_b1)),
+    ifelse(
+      adjusted_log_connections_p < 0.001,
+      "< 0.001",
+      sprintf("%.3f", adjusted_log_connections_p)
+    )
+  )
+) |>
+  mutate(
+    Estimate = round(Estimate, 3),
+    `OLS SE` = round(`OLS SE`, 3),
+    `HC3 SE` = round(`HC3 SE`, 3)
+  )
+
+knitr::kable(
+  adjusted_table,
+  format = "latex",
+  booktabs = TRUE,
+  longtable = FALSE,
+  align = c("l", "c", "c", "c", "c", "c")
+)
+```
+
+```{r tbl-model-fit}
+#| tbl-cap: "Comparison of the unadjusted and expanded model fit."
+
+model_fit_table <- tibble(
+  Model = c("Unadjusted", "Expanded"),
+  `Included variables` = c(
+    "MCL violation",
+    "MCL violation, size, owner type, region"
+  ),
+  `R-squared` = c(r2, adjusted_r2),
+  `Adjusted R-squared` = c(
+    model_sum$adj.r.squared,
+    adjusted_adj_r2
+  )
+) |>
+  mutate(
+    `R-squared` = round(`R-squared`, 3),
+    `Adjusted R-squared` = round(`Adjusted R-squared`, 3)
+  )
+
+knitr::kable(
+  model_fit_table,
+  format = "latex",
+  booktabs = TRUE,
+  longtable = FALSE,
+  align = c("l", "l", "c", "c")
+)
+```
+
+The fitted baseline regression is
+
+$$
+\widehat{Y}_i = `r round(b0, 3)` - `r abs(round(b1, 3))`X_i.
+$$
+
+The intercept is the estimated mean MHI for systems without a primary MCL violation, `r money(b0 * 10000)`. The slope gives the difference between the two groups. Systems with a primary MCL violation had an estimated mean MHI **`r money(abs(slope_dollars))` lower** than systems without one.
+
+The 95% OLS confidence interval for this difference is from `r money(ci_dollars_low)` to `r money(ci_dollars_high)`. The test statistic was $t=`r round(t_b1, 2)`$ with `r df.residual(model)` degrees of freedom, and the p-value was `r ifelse(p_b1 < 0.001, "below 0.001", round(p_b1, 3))`. This result describes the same gap shown by the two group means. Its main purpose is to provide a baseline for the fuller model, not to establish a causal effect.
+
+With violation status as the only predictor, the $R^2$ is `r round(r2, 3)`. In other words, the model explains about `r scales::percent(r2, accuracy = 0.1)` of the observed variation in MHI. The group averages differ, but most of the system-to-system variation remains unexplained.
+
+After adding log service connections, owner type, and regional board, the estimated difference for a system with a primary MCL violation was `r money(abs(adjusted_slope_dollars))` lower, holding the other variables constant. The 95% HC3 confidence interval runs from `r money(abs(adjusted_ci_dollars_high))` to `r money(abs(adjusted_ci_dollars_low))` lower. The HC3 p-value was `r ifelse(adjusted_p_b1 < 0.001, "below 0.001", round(adjusted_p_b1, 3))`. The estimate is smaller than the original group difference, which suggests that system size, ownership, or region account for part of the raw gap. This remains an adjusted association, not evidence that the violation causes lower income.
+
+The added variables improved model fit. The expanded model has an $R^2$ of `r round(adjusted_r2, 3)` and an adjusted $R^2$ of `r round(adjusted_adj_r2, 3)`, compared with `r round(r2, 3)` and `r round(model_sum$adj.r.squared, 3)` for the baseline model. Even so, about `r scales::percent(1 - adjusted_r2, accuracy = 0.1)` remains unexplained. The size coefficient is `r round(adjusted_log_connections_b1, 3)` in units of $10,000 per tenfold increase, with an HC3 p-value of `r ifelse(adjusted_log_connections_p < 0.001, "below 0.001", round(adjusted_log_connections_p, 3))`.
+
+```{r fig-diagnostics}
+#| fig-cap: "Diagnostics for the expanded multiple regression showing residuals by violation status and a normal Q-Q plot."
+#| fig-width: 8
+#| fig-height: 4
+
+p_resid <- ggplot(model_diagnostics, aes(x = mcl_status, y = residual)) +
+  geom_boxplot(outlier.shape = NA, width = 0.55) +
+  geom_jitter(width = 0.12, alpha = 0.14, size = 0.7) +
+  geom_hline(yintercept = 0, linetype = "dashed") +
+  scale_x_discrete(
+    labels = c(
+      "No primary MCL violation" = "No violation",
+      "Primary MCL violation" = "Violation"
+    )
+  ) +
+  labs(
+    x = NULL,
+    y = "Residual (MHI in $10,000s)",
+    title = "Residuals by violation status"
+  )
+
+p_qq <- ggplot(model_diagnostics, aes(sample = residual)) +
+  stat_qq(alpha = 0.4, size = 1) +
+  stat_qq_line() +
+  labs(
+    x = "Theoretical quantile",
+    y = "Sample quantile",
+    title = "Normal Q-Q plot"
+  )
+
+gridExtra::grid.arrange(p_resid, p_qq, ncol = 2)
+```
+
+The residual plot shows some differences in spread between the groups, while the Q-Q plot moves away from the reference line in the upper tail. The residual standard deviation was `r money(adjusted_resid_sd_no * 10000)` for systems without a violation and `r money(adjusted_resid_sd_yes * 10000)` for systems with a violation. These plots show that the model assumptions are not fully met, which is why I also use HC3 standard errors and sensitivity checks.
+
+For the baseline model, the HC3 standard error for the violation coefficient was `r money(robust_se_b1 * 10000)`, compared with `r money(ols_se_b1 * 10000)` using ordinary least squares. The HC3 p-value was `r ifelse(robust_p_b1 < 0.001, "below 0.001", round(robust_p_b1, 3))`. For the expanded model, the HC3 standard error was `r money(adjusted_robust_se["mcl_violation"] * 10000)`, compared with an OLS standard error of `r money(adjusted_model_sum$coefficients["mcl_violation", 2] * 10000)`. These standard errors do not change the estimated differences, but they provide uncertainty estimates that are more robust to heteroskedasticity.
+
+I also checked whether the results change when using log MHI instead of the original dollar values. After accounting for the other system characteristics, the estimated MHI was `r scales::percent(abs(log_percent_change) / 100, accuracy = 0.1)` lower for systems with a primary MCL violation. The 95% HC3 confidence interval ranged from `r scales::percent(abs(log_percent_ci_low) / 100, accuracy = 0.1)` lower to `r scales::percent(log_percent_ci_high / 100, accuracy = 0.1)` higher, with a p-value of `r ifelse(log_p_b1 < 0.001, "below 0.001", round(log_p_b1, 3))`. The estimated difference is still in the same direction as the original model, although the confidence interval also includes no difference between the groups. This shows that the adjusted results change depending on how MHI is modeled.
+
+Finally, I removed the `r n_low_endpoint + n_high_endpoint` systems with MHI values recorded at exactly $2,500 or $250,000 and ran the dollar-scale model again. The results show an estimated MHI of `r money(abs(sensitivity_slope))` lower for systems with a primary MCL violation. The 95% confidence interval ranged from `r money(sensitivity_ci_low)` to `r money(sensitivity_ci_high)`, with a p-value of `r ifelse(sensitivity_p < 0.001, "below 0.001", round(sensitivity_p, 3))`. The difference remains in the same direction after removing these systems, which suggests that the endpoint values are not driving the main result.
+
+# Discussion {#sec-discussion}
+
+The direct comparison shows that water systems with a current primary MCL violation tend to serve communities with lower estimated MHI compared to the ones without a violation. The difference between the two groups was about \$25,456. I then added system size, owner type, and regional board to the regression model to see whether the difference remains after accounting for these other characteristics. The estimated difference decreased to about \$14,045. The expanded model explains more of the variation in income compared to the model with only violation status, although much of the variation among systems is still unexplained.
+
+I also used a log-MHI model to check whether the results change when accounting for the skewed income data. The results show the same direction of the difference, although the confidence interval included values close to no difference. This suggests that the estimated difference depends partly on how income is modeled. Overall, the results show a relationship between MHI and primary MCL violations, but this does not mean that one causes the other. The findings are also consistent with previous research showing a relationship between drinking water violations and socioeconomic disadvantage (Balazs et al., 2012; California State Water Resources Control Board, 2026a).
+
+## Limitations and Future Improvements
+
+There are several limitations to this analysis. The main limitation is that the results cannot show whether lower household income causes MCL violations. Some water systems also have missing MHI data, which means they were not included in the analysis. These systems may have different characteristics compared to the ones with available income data. If the missing data is related to income, violation status, or other system characteristics, the difference between the two groups could change.
+
+The MHI values are service-area estimates based on ACS and geographic data rather than measurements from every household. The violation group was smaller, so its estimates are less precise. The expanded model accounts for system size, ownership, and geographic region, but it does not include source-water type, infrastructure, contaminant type, or other unmeasured factors. The violation indicator also gives no information about how severe a violation was or how long it lasted.
+
+In the future, this project could use multiple years of data to study changes over time. It could also model violation status as the response with logistic regression or examine contaminant types separately. A longitudinal or spatial model would help account for similarities among nearby systems. These approaches could show whether the observed income differences remain after considering a wider range of system conditions.
+
+## Conclusion
+
+For this project, I examined California community water systems to see how service-area income is related to current primary MCL violations. I cleaned the SAFER data and directly compared the two groups of water systems. I then used a baseline regression and an expanded regression with other system characteristics to see whether the difference remains. I also used robust standard errors and sensitivity checks to see whether the results change.
+
+The results show that water systems with a primary MCL violation tend to serve communities with lower estimated MHI compared to the ones without. The income gap decreased from \$25,456 before adjustment to \$14,045 after adjustment, and the log-MHI result was weaker. The baseline model with only violation status explained about `r scales::percent(r2, accuracy = 0.1)` of the variation in MHI, while the expanded model had an adjusted $R^2$ of about `r scales::percent(adjusted_adj_r2, accuracy = 0.1)`. These $R^2$ values show how much of the variation in MHI is explained by the variables included in the models for this dataset. However, they do not mean that one variable causes another or that the results would be the same for other datasets. Overall, the expanded model helps explain the difference in income between the two groups after accounting for other system characteristics, although the relationship is descriptive, not causal. The sensitivity checks also show that the estimated difference can change depending on the model used, which means the results should not be treated as a strong prediction by themselves.
+
+# References
+
+Allaire, M., Wu, H., & Lall, U. (2018). National trends in drinking water quality violations. *Proceedings of the National Academy of Sciences, 115*(9), 2078--2083. https://doi.org/10.1073/pnas.1719805115
+
+Balazs, C. L., Morello-Frosch, R., Hubbard, A. E., & Ray, I. (2012). Environmental justice implications of arsenic contamination in California's San Joaquin Valley: A cross-sectional, cluster-design examining exposure and compliance in community drinking water systems. *Environmental Health, 11*, 84. https://doi.org/10.1186/1476-069X-11-84
+
+California State Water Resources Control Board. (2024). *Failing water systems: The Human Right to Water (HR2W) list criteria*. https://www.waterboards.ca.gov/water_issues/programs/hr2w/docs/hr2w_expanded_criteria.pdf
+
+California State Water Resources Control Board. (2026a). *2026 Drinking Water Needs Assessment*. https://www.waterboards.ca.gov/drinking_water/certlic/drinkingwater/documents/needs/2026needsassessment.pdf
+
+California State Water Resources Control Board. (2026b). *Drinking Water - SAFER Dashboard Failing and At-Risk Drinking Water Systems* [Data set]. California Open Data. https://lab.data.ca.gov/dataset/safer-failing-and-at-risk-drinking-water-systems
+
+California State Water Resources Control Board. (2026c). *Median Household Income (MHI) and Economic Status Determination Methodology*. https://www.waterboards.ca.gov/drinking_water/certlic/drinkingwater/documents/needs/2026/2026mhi-calculation.pdf
+
+R Core Team. (2026). *R: A language and environment for statistical computing*. R Foundation for Statistical Computing. https://www.R-project.org/
+
+Wickham, H. (2016). *ggplot2: Elegant graphics for data analysis*. Springer-Verlag New York. https://ggplot2.tidyverse.org/
